@@ -1,6 +1,6 @@
 "use client";
 
-import { SearchIcon, BellIcon, ChevronRightIcon, MenuIcon } from "./icons";
+import { SearchIcon, ChevronRightIcon, MenuIcon } from "./icons";
 import { SignOutButton } from "@/app/components/sign-out-button";
 
 interface AppTopbarProps {
@@ -48,16 +48,6 @@ export function AppTopbar({ onMenuClick }: AppTopbarProps) {
             aria-label="Search"
           />
         </div>
-
-        {/* Notifications */}
-        <button
-          type="button"
-          className="relative flex h-9 w-9 items-center justify-center rounded-full border border-border bg-workspace text-muted transition-colors hover:bg-workspace hover:text-charcoal"
-          aria-label="Notifications"
-        >
-          <BellIcon className="h-5 w-5" />
-          <span className="absolute right-2 top-2 h-2 w-2 rounded-full border border-navy-900 bg-gold" />
-        </button>
 
         <SignOutButton compact />
       </div>
