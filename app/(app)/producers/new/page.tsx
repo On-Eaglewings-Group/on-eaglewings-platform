@@ -1,34 +1,53 @@
 import Link from "next/link";
-import { FileIcon, UsersIcon } from "@/app/components/icons";
+import { redirect } from "next/navigation";
+import { createClient } from "@/lib/supabase/server";
+import { getWorkspaceAccess } from "@/lib/auth/workspace-access";
+import { BuildingIcon, ArrowLeftIcon } from "@/app/components/icons";
+import { ProducerForm } from "../components/producer-form";
 
-export default function ProducersNewPage() {
+export default async function ProducersNewPage() {
+  const supabase = await createClient();
+  const access = await getWorkspaceAccess(supabase);
+
+  if (access.status === "unauthenticated") {
+    redirect("/sign-in");
+  }
+  if (access.status !== "allowed") {
+    redirect("/access-denied");
+  }
+
+  // Fetch available mines to allow optional linkage
+  const { data: mines } = await supabase
+    .from("mines")
+    .select("id, name, country_code, region")
+    .eq("workspace_id", access.workspaceId)
+    .is("archived_at", null)
+    .order("name", { ascending: true });
+
   return (
-    <div>
-      <div className="flex items-center gap-3">
-        <div className="flex h-10 w-10 items-center justify-center rounded-full bg-navy-900 text-navy-300">
-          <UsersIcon className="h-5 w-5" />
-        </div>
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight text-charcoal">Add a Producer</h1>
-          <p className="text-sm text-muted">Register a producing entity in the directory. This will open the producer form.</p>
-        </div>
-      </div>
-
-      <div className="mt-6 rounded-xl border border-border bg-white p-6 shadow-sm">
-        <div className="flex items-center gap-2 text-muted">
-          <FileIcon className="h-4 w-4" />
-          <p className="text-sm">Form not yet built.</p>
-        </div>
-        <p className="mt-2 text-sm text-muted">
-          The producer form will capture entity details, commodity focus, location, production capacity, and commercial status.
-        </p>
+    <div className="max-w-4xl space-y-6">
+      <div>
         <Link
           href="/producers"
-          className="mt-4 inline-flex items-center gap-2 rounded-lg border border-border px-4 py-2.5 text-sm font-medium text-charcoal transition-colors hover:bg-workspace"
+          className="inline-flex items-center gap-1.5 text-xs font-medium text-navy-700 hover:text-navy-900"
         >
+          <ArrowLeftIcon className="h-3.5 w-3.5" />
           Back to Producers
         </Link>
+        <div className="mt-3 flex items-center gap-3">
+          <div className="flex h-10 w-10 items-center justify-center rounded-full bg-navy-900 text-navy-300">
+            <BuildingIcon className="h-5 w-5" />
+          </div>
+          <div>
+            <h1 className="text-2xl font-bold tracking-tight text-charcoal">Register a Producer</h1>
+            <p className="text-sm text-muted">
+              Add a mineral producer or mining entity to the supplier network.
+            </p>
+          </div>
+        </div>
       </div>
+
+      <ProducerForm mines={mines ?? []} />
     </div>
   );
 }

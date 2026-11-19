@@ -15,3 +15,23 @@ export async function getWorkspaceAccess(client: SupabaseClient) {
     return { data, error };
   });
 }
+
+export interface AllowedWorkspaceAccess {
+  status: "allowed";
+  userId: string;
+  workspaceId: string;
+  role: string;
+}
+
+export async function requireWorkspaceAccess(client: SupabaseClient): Promise<AllowedWorkspaceAccess> {
+  const access = await getWorkspaceAccess(client);
+  if (access.status !== "allowed" || !access.workspaceId || !access.userId) {
+    throw new Error(
+      access.status === "unauthenticated"
+        ? "You must be signed in to perform this action."
+        : "You do not have active access to this workspace.",
+    );
+  }
+  return access as AllowedWorkspaceAccess;
+}
+
