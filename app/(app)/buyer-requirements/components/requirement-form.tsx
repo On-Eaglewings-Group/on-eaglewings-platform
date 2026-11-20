@@ -109,10 +109,8 @@ export function RequirementForm({
   const router = useRouter();
   const [lines, setLines] = useState<RequirementLine[]>([emptyLine()]);
 
-  const action =
-    mode === "create"
-      ? createBuyerRequirementAction
-      : updateBuyerRequirementAction.bind(null, requirementId!);
+  const action = mode === "create" ? createBuyerRequirementAction : updateBuyerRequirementAction;
+
 
   const [state, formAction, isPending] = useActionState<
     BuyerRequirementActionResult | null,
