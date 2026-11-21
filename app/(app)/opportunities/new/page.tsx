@@ -3,6 +3,7 @@ import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
 import { getWorkspaceAccess } from "@/lib/auth/workspace-access";
 import { OpportunityForm } from "@/app/(app)/opportunities/components/opportunity-form";
+import { firstRelation } from "@/lib/relations";
 import { GemIcon, ArrowLeftIcon } from "@/app/components/icons";
 
 export default async function OpportunitiesNewPage() {
@@ -35,7 +36,7 @@ export default async function OpportunitiesNewPage() {
   // Fetch workspace members for owner selector
   const { data: members } = await supabase
     .from("workspace_memberships")
-    .select("user_id, user_profiles(full_name, email)")
+    .select("user_id, user_profiles(display_name)")
     .eq("workspace_id", access.workspaceId)
     .eq("status", "active");
 
@@ -66,7 +67,9 @@ export default async function OpportunitiesNewPage() {
           }))}
           members={(members ?? []).map((m) => ({
             user_id: m.user_id,
-            user_profiles: m.user_profiles?.[0] ?? null,
+            user_profiles: firstRelation(
+              m.user_profiles as { display_name: string | null } | { display_name: string | null }[] | null,
+            ),
           }))}
         />
       </div>

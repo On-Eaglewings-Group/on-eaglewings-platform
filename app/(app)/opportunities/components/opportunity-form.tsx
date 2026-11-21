@@ -24,7 +24,7 @@ interface Mine {
 
 interface WorkspaceMember {
   user_id: string;
-  user_profiles: { full_name: string | null; email: string | null } | null;
+  user_profiles: { display_name: string | null } | null;
 }
 
 interface OpportunityFormProps {
@@ -208,9 +208,7 @@ export function OpportunityForm({
             <option value="">— Unassigned —</option>
             {members.map((m) => (
               <option key={m.user_id} value={m.user_id}>
-                {m.user_profiles?.full_name ??
-                  m.user_profiles?.email ??
-                  m.user_id}
+                {m.user_profiles?.display_name || "Workspace member"}
               </option>
             ))}
           </select>

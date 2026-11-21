@@ -3,6 +3,7 @@ import { notFound, redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
 import { getWorkspaceAccess } from "@/lib/auth/workspace-access";
 import { MeetingForm } from "@/app/(app)/meetings/components/meeting-form";
+import { formatWallClock } from "@/lib/datetime";
 import { ArrowLeftIcon, CalendarIcon } from "@/app/components/icons";
 
 interface MeetingForForm {
@@ -42,7 +43,6 @@ export default async function MeetingEditPage({
     .select("id, title, status, starts_at, ends_at, timezone, location, agenda, outcome, mineral_opportunity_id, buyer_requirement_id")
     .eq("id", id)
     .eq("workspace_id", access.workspaceId)
-    .is("archived_at", null)
     .single();
 
   if (error || !meeting) {
@@ -80,8 +80,9 @@ export default async function MeetingEditPage({
     .eq("meeting_id", id)
     .eq("workspace_id", access.workspaceId);
 
-  const startsAt = meeting.starts_at ? new Date(meeting.starts_at) : null;
-  const endsAt = meeting.ends_at ? new Date(meeting.ends_at) : null;
+  const zone = meeting.timezone || "UTC";
+  const startsAt = meeting.starts_at ? formatWallClock(meeting.starts_at, zone) : null;
+  const endsAt = meeting.ends_at ? formatWallClock(meeting.ends_at, zone) : null;
 
   return (
     <div className="space-y-6">
@@ -127,10 +128,10 @@ export default async function MeetingEditPage({
           }))}
           defaultValues={{
             title: meeting.title,
-            starts_at_date: startsAt ? startsAt.toISOString().split("T")[0] : "",
-            starts_at_time: startsAt ? startsAt.toISOString().split("T")[1].substring(0, 5) : "09:00",
-            ends_at_date: endsAt ? endsAt.toISOString().split("T")[0] : null,
-            ends_at_time: endsAt ? endsAt.toISOString().split("T")[1].substring(0, 5) : null,
+            starts_at_date: startsAt?.date ?? "",
+            starts_at_time: startsAt?.time ?? "09:00",
+            ends_at_date: endsAt?.date ?? null,
+            ends_at_time: endsAt?.time ?? null,
             timezone: meeting.timezone || "UTC",
             location: meeting.location,
             agenda: meeting.agenda,

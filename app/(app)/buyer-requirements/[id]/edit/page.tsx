@@ -3,6 +3,7 @@ import { notFound, redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
 import { getWorkspaceAccess } from "@/lib/auth/workspace-access";
 import { RequirementForm } from "@/app/(app)/buyer-requirements/components/requirement-form";
+import { firstRelation } from "@/lib/relations";
 import { ArrowLeftIcon, ClipboardIcon } from "@/app/components/icons";
 
 interface RequirementForForm {
@@ -63,14 +64,25 @@ export default async function BuyerRequirementEditPage({
   const { data: commodities } = await supabase
     .from("commodities")
     .select("id, code, name")
-    .eq("workspace_id", access.workspaceId)
-    .is("archived_at", null)
     .order("code", { ascending: true });
+
+  const { data: units } = await supabase
+    .from("units")
+    .select("code, name")
+    .eq("dimension", "mass")
+    .order("code", { ascending: true });
+
+  const { data: existingLines } = await supabase
+    .from("requirement_lines")
+    .select("id, commodity_id, product_form, quantity_min, quantity_max, unit_code, delivery_from, delivery_until, notes")
+    .eq("buyer_requirement_id", id)
+    .eq("workspace_id", access.workspaceId)
+    .order("created_at", { ascending: true });
 
   // Fetch workspace members for owner selector
   const { data: members } = await supabase
     .from("workspace_memberships")
-    .select("user_id, user_profiles(full_name, email)")
+    .select("user_id, user_profiles(display_name)")
     .eq("workspace_id", access.workspaceId)
     .eq("status", "active");
 
@@ -110,9 +122,23 @@ export default async function BuyerRequirementEditPage({
             code: c.code,
             name: c.name,
           }))}
+          units={(units ?? []).map((unit) => ({ code: unit.code, name: unit.name }))}
           members={(members ?? []).map((m) => ({
             user_id: m.user_id,
-            user_profiles: m.user_profiles?.[0] ?? null,
+            user_profiles: firstRelation(
+              m.user_profiles as { display_name: string | null } | { display_name: string | null }[] | null,
+            ),
+          }))}
+          initialLines={(existingLines ?? []).map((line) => ({
+            id: line.id,
+            commodityId: line.commodity_id,
+            productForm: line.product_form ?? "",
+            quantityMin: line.quantity_min === null ? "" : String(line.quantity_min),
+            quantityMax: line.quantity_max === null ? "" : String(line.quantity_max),
+            unitCode: line.unit_code ?? "",
+            deliveryFrom: line.delivery_from ?? "",
+            deliveryUntil: line.delivery_until ?? "",
+            notes: line.notes ?? "",
           }))}
           defaultValues={{
             title: requirement.title,

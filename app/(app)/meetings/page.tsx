@@ -19,7 +19,6 @@ interface MeetingRow {
   created_at: string;
   updated_at: string;
   meeting_attendees?: Array<{
-    id: string;
     contact_id: string;
     contacts?: { id: string; full_name: string; email: string | null } | null;
   }> | null;
@@ -82,7 +81,6 @@ export default async function MeetingsPage({
       created_at,
       updated_at,
       meeting_attendees (
-        id,
         contact_id,
         contacts (
           id,
@@ -100,7 +98,6 @@ export default async function MeetingsPage({
       )
     `)
     .eq("workspace_id", access.workspaceId)
-    .is("archived_at", null)
     .order("starts_at", { ascending: true });
 
   if (statusFilter && statusFilter !== "all") {
