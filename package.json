@@ -7,7 +7,8 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "test:auth": "node --test tests/auth/*.test.mjs"
+    "test:auth": "node --test tests/auth/*.test.mjs",
+    "test:workflows": "node --experimental-strip-types --test tests/workflows/repair.test.mjs"
   },
   "dependencies": {
     "@supabase/ssr": "0.12.7",

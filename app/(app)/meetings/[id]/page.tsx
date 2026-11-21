@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
+import { formatWallClock } from "@/lib/datetime";
 import { getWorkspaceAccess } from "@/lib/auth/workspace-access";
 import { ArrowLeftIcon, PencilIcon, FileIcon, CalendarIcon } from "@/app/components/icons";
 
@@ -18,13 +19,14 @@ interface MeetingDetail {
   buyer_requirement_id: string | null;
   created_at: string;
   updated_at: string;
-  archived_at: string | null;
   meeting_attendees?: Array<{
-    id: string;
     contact_id: string;
     attendance_status: string | null;
     attendee_role: string | null;
-    contacts?: { id: string; full_name: string; job_title: string | null; email: string | null } | null;
+    contacts?:
+      | { id: string; full_name: string; job_title: string | null; email: string | null }
+      | { id: string; full_name: string; job_title: string | null; email: string | null }[]
+      | null;
   }> | null;
   mineral_opportunities?: { id: string; title: string } | null;
   buyer_requirements?: { id: string; title: string } | null;
@@ -83,9 +85,7 @@ export default async function MeetingDetailPage({
       buyer_requirement_id,
       created_at,
       updated_at,
-      archived_at,
       meeting_attendees (
-        id,
         contact_id,
         attendance_status,
         attendee_role,
@@ -107,7 +107,6 @@ export default async function MeetingDetailPage({
     `)
     .eq("id", id)
     .eq("workspace_id", access.workspaceId)
-    .is("archived_at", null)
     .single();
 
   if (error || !meeting) {
@@ -178,8 +177,11 @@ export default async function MeetingDetailPage({
               <div className="mt-2 flex items-center gap-1.5 text-xs text-muted">
                 <CalendarIcon className="h-3.5 w-3.5 shrink-0 text-navy-700" />
                 <span>
-                  {new Date(meeting.starts_at).toLocaleString()}
-                  {meeting.ends_at && ` – ${new Date(meeting.ends_at).toLocaleTimeString()}`}
+                  {formatWallClock(meeting.starts_at, meeting.timezone || "UTC").date}{" "}
+                  {formatWallClock(meeting.starts_at, meeting.timezone || "UTC").time}
+                  {meeting.ends_at &&
+                    ` – ${formatWallClock(meeting.ends_at, meeting.timezone || "UTC").time}`}
+                  {` (${meeting.timezone || "UTC"})`}
                 </span>
               </div>
             )}
@@ -209,14 +211,16 @@ export default async function MeetingDetailPage({
                 Attendees ({meeting.meeting_attendees.length})
               </h3>
               <div className="space-y-2">
-                {meeting.meeting_attendees.map((a) => (
-                  <div key={a.id} className="flex items-center justify-between p-3 rounded-lg border border-border bg-workspace/50">
+                {meeting.meeting_attendees.map((a) => {
+                  const contact = Array.isArray(a.contacts) ? a.contacts[0] : a.contacts;
+                  return (
+                  <div key={a.contact_id} className="flex items-center justify-between p-3 rounded-lg border border-border bg-workspace/50">
                     <div className="min-w-0">
                       <p className="text-sm font-medium text-charcoal truncate">
-                        {a.contacts?.[0]?.full_name || "Unknown contact"}
+                        {contact?.full_name || "Unknown contact"}
                       </p>
                       <p className="text-xs text-muted truncate">
-                        {a.contacts?.[0]?.job_title || a.contacts?.[0]?.email || ""}
+                        {contact?.job_title || contact?.email || ""}
                       </p>
                     </div>
                     <span className="text-xs text-muted capitalize">
@@ -226,12 +230,13 @@ export default async function MeetingDetailPage({
                       <span className="text-xs text-muted">{a.attendee_role}</span>
                     )}
                   </div>
-                ))}
+                  );
+                })}
               </div>
             </div>
           )}
 
-          {relatedOpportunity || relatedRequirement && (
+          {(relatedOpportunity || relatedRequirement) && (
             <div className="rounded-xl border border-border bg-white p-6 shadow-sm">
               <h3 className="text-xs font-semibold text-charcoal uppercase tracking-wider mb-4">Related</h3>
               {relatedOpportunity && (

@@ -4,6 +4,7 @@ import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
 import { requireWorkspaceAccess } from "@/lib/auth/workspace-access";
+import { wallClockToUtcIso } from "@/lib/datetime";
 
 export interface MeetingActionResult {
   ok: boolean;
@@ -41,6 +42,30 @@ function canDelete(role: string): boolean {
   return role === "owner" || role === "admin";
 }
 
+function resolveMeetingTimes(
+  startsAtDate: string,
+  startsAtTime: string,
+  endsAtDate: string | null,
+  endsAtTime: string | null,
+  timezone: string,
+): { startsAt: string; endsAt: string | null } | { error: string } {
+  try {
+    const startsAt = wallClockToUtcIso(startsAtDate, startsAtTime, timezone);
+    let endsAt: string | null = null;
+    if (endsAtDate) {
+      endsAt = wallClockToUtcIso(endsAtDate, endsAtTime || startsAtTime, timezone);
+      if (endsAt <= startsAt) {
+        return { error: "Meeting end time must be after the start time." };
+      }
+    }
+    return { startsAt, endsAt };
+  } catch (error) {
+    return {
+      error: error instanceof Error ? error.message : "Enter a valid meeting time.",
+    };
+  }
+}
+
 export async function createMeetingAction(
   _prevState: MeetingActionResult | null,
   formData: FormData,
@@ -69,17 +94,11 @@ export async function createMeetingAction(
     return { ok: false, error: "Meeting date is required." };
   }
 
-  const startsAt = `${startsAtDate}T${startsAtTime}:00`;
-  let endsAt: string | null = null;
-  if (endsAtDate) {
-    endsAt = `${endsAtDate}T${endsAtTime || startsAtTime}:00`;
-    if (endsAt <= startsAt) {
-      return {
-        ok: false,
-        error: "Meeting end time must be after the start time.",
-      };
-    }
+  const times = resolveMeetingTimes(startsAtDate, startsAtTime, endsAtDate, endsAtTime, timezone);
+  if ("error" in times) {
+    return { ok: false, error: times.error };
   }
+  const { startsAt, endsAt } = times;
 
   const status = VALID_STATUSES.includes(statusRaw as MeetingStatus)
     ? (statusRaw as MeetingStatus)
@@ -190,6 +209,7 @@ export async function updateMeetingAction(
     (formData.get("mineral_opportunity_id") as string | null)?.trim() || null;
   const requirementId =
     (formData.get("buyer_requirement_id") as string | null)?.trim() || null;
+  const attendeeIds = formData.getAll("attendee_ids") as string[];
 
   if (!title) {
     return { ok: false, error: "Meeting title is required." };
@@ -198,17 +218,11 @@ export async function updateMeetingAction(
     return { ok: false, error: "Meeting date is required." };
   }
 
-  const startsAt = `${startsAtDate}T${startsAtTime}:00`;
-  let endsAt: string | null = null;
-  if (endsAtDate) {
-    endsAt = `${endsAtDate}T${endsAtTime || startsAtTime}:00`;
-    if (endsAt <= startsAt) {
-      return {
-        ok: false,
-        error: "Meeting end time must be after the start time.",
-      };
-    }
+  const times = resolveMeetingTimes(startsAtDate, startsAtTime, endsAtDate, endsAtTime, timezone);
+  if ("error" in times) {
+    return { ok: false, error: times.error };
   }
+  const { startsAt, endsAt } = times;
 
   const status = VALID_STATUSES.includes(statusRaw as MeetingStatus)
     ? (statusRaw as MeetingStatus)
@@ -256,6 +270,56 @@ export async function updateMeetingAction(
       ok: false,
       error: `Failed to update meeting: ${updateError.message}`,
     };
+  }
+
+  const desiredAttendees = [...new Set(attendeeIds.map((id) => id.trim()).filter(Boolean))];
+  const { data: currentAttendees, error: attendeeReadError } = await supabase
+    .from("meeting_attendees")
+    .select("contact_id")
+    .eq("meeting_id", meetingId)
+    .eq("workspace_id", access.workspaceId);
+
+  if (attendeeReadError) {
+    return {
+      ok: false,
+      error: `Meeting details were saved, but attendees could not be read: ${attendeeReadError.message}`,
+    };
+  }
+
+  const currentIds = new Set((currentAttendees ?? []).map((row) => row.contact_id as string));
+  const toAdd = desiredAttendees.filter((id) => !currentIds.has(id));
+  const toRemove = [...currentIds].filter((id) => !desiredAttendees.includes(id));
+
+  if (toAdd.length > 0) {
+    const { error: addError } = await supabase.from("meeting_attendees").insert(
+      toAdd.map((contactId) => ({
+        workspace_id: access.workspaceId,
+        meeting_id: meetingId,
+        contact_id: contactId,
+        attendance_status: "invited" as AttendanceStatus,
+      })),
+    );
+    if (addError) {
+      return {
+        ok: false,
+        error: `Meeting details were saved, but new attendees could not be added. Existing attendees were kept. ${addError.message}`,
+      };
+    }
+  }
+
+  if (toRemove.length > 0) {
+    const { error: removeError } = await supabase
+      .from("meeting_attendees")
+      .delete()
+      .eq("meeting_id", meetingId)
+      .eq("workspace_id", access.workspaceId)
+      .in("contact_id", toRemove);
+    if (removeError) {
+      return {
+        ok: false,
+        error: `New attendees were saved, but an attendee could not be removed. ${removeError.message}`,
+      };
+    }
   }
 
   revalidatePath(`/meetings/${meetingId}`);
