@@ -1,6 +1,6 @@
 "use client";
 
-import { useActionState, useEffect, useRef, useState } from "react";
+import { useActionState, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   createBuyerRequirementAction,
@@ -24,10 +24,16 @@ interface Commodity {
 
 interface WorkspaceMember {
   user_id: string;
-  user_profiles: { full_name: string | null; email: string | null } | null;
+  user_profiles: { display_name: string | null } | null;
+}
+
+interface UnitOption {
+  code: string;
+  name: string;
 }
 
 interface RequirementLine {
+  id: string;
   commodityId: string;
   productForm: string;
   quantityMin: string;
@@ -43,7 +49,9 @@ interface RequirementFormProps {
   requirementId?: string;
   organizations: Organization[];
   commodities: Commodity[];
+  units: UnitOption[];
   members: WorkspaceMember[];
+  initialLines?: RequirementLine[];
   defaultValues?: {
     title?: string;
     status?: string;
@@ -88,6 +96,7 @@ const INCOTERMS = [
 ];
 
 const emptyLine = (): RequirementLine => ({
+  id: "",
   commodityId: "",
   productForm: "",
   quantityMin: "",
@@ -103,11 +112,15 @@ export function RequirementForm({
   requirementId,
   organizations,
   commodities,
+  units,
   members,
+  initialLines,
   defaultValues = {},
 }: RequirementFormProps) {
   const router = useRouter();
-  const [lines, setLines] = useState<RequirementLine[]>([emptyLine()]);
+  const [lines, setLines] = useState<RequirementLine[]>(
+    initialLines && initialLines.length > 0 ? initialLines : [emptyLine()],
+  );
 
   const action = mode === "create" ? createBuyerRequirementAction : updateBuyerRequirementAction;
 
@@ -128,7 +141,10 @@ export function RequirementForm({
   }
 
   function removeLine(idx: number) {
-    setLines((prev) => prev.filter((_, i) => i !== idx));
+    setLines((prev) => {
+      const next = prev.filter((_, i) => i !== idx);
+      return next.length > 0 ? next : [emptyLine()];
+    });
   }
 
   function updateLine(
@@ -143,6 +159,10 @@ export function RequirementForm({
 
   return (
     <form action={formAction} className="space-y-6">
+      {mode === "edit" && requirementId && (
+        <input type="hidden" name="requirement_id" value={requirementId} />
+      )}
+      <input type="hidden" name="lines_submitted" value="1" />
       {state && !state.ok && state.error && (
         <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">
           {state.error}
@@ -222,9 +242,7 @@ export function RequirementForm({
             <option value="">— Unassigned —</option>
             {members.map((m) => (
               <option key={m.user_id} value={m.user_id}>
-                {m.user_profiles?.full_name ??
-                  m.user_profiles?.email ??
-                  m.user_id}
+                {m.user_profiles?.display_name || "Workspace member"}
               </option>
             ))}
           </select>
@@ -346,8 +364,8 @@ export function RequirementForm({
         </div>
       </div>
 
-      {/* Commodity lines — only shown in create mode */}
-      {mode === "create" && (
+      {/* Commodity lines */}
+      {(
         <div className="rounded-xl border border-border bg-white p-6 shadow-sm space-y-4">
           <div className="flex items-center justify-between">
             <h2 className="text-sm font-semibold text-charcoal">
@@ -364,12 +382,14 @@ export function RequirementForm({
           </div>
           {commodities.length === 0 && (
             <p className="text-xs text-muted">
-              No commodities are registered in the system yet. Lines can be
-              added after commodities are configured.
+              The commodity catalogue could not be loaded. Existing lines stay attached to their saved commodity until the catalogue is available.
             </p>
           )}
-          {commodities.length > 0 &&
-            lines.map((line, idx) => (
+          {lines.map((line, idx) => { 
+            const commodityOptions = commodities.some((commodity) => commodity.id === line.commodityId) || !line.commodityId
+              ? commodities
+              : [...commodities, { id: line.commodityId, code: "saved", name: "Saved commodity" }];
+            return (
               <div
                 key={idx}
                 className="rounded-lg border border-border bg-workspace/30 p-4 space-y-3"
@@ -378,7 +398,7 @@ export function RequirementForm({
                   <span className="text-xs font-medium text-muted">
                     Line {idx + 1}
                   </span>
-                  {lines.length > 1 && (
+                  {(lines.length > 1 || line.id) && (
                     <button
                       type="button"
                       onClick={() => removeLine(idx)}
@@ -389,6 +409,7 @@ export function RequirementForm({
                   )}
                 </div>
 
+                <input type="hidden" name={`lines[${idx}][id]`} value={line.id} />
                 <input
                   type="hidden"
                   name={`lines[${idx}][commodity_id]`}
@@ -408,7 +429,7 @@ export function RequirementForm({
                       className="w-full rounded-lg border border-border bg-white px-3 py-2 text-sm text-charcoal focus:border-navy-900 focus:outline-none focus:ring-1 focus:ring-navy-900"
                     >
                       <option value="">— Select —</option>
-                      {commodities.map((c) => (
+                      {commodityOptions.map((c) => (
                         <option key={c.id} value={c.id}>
                           {c.name} ({c.code})
                         </option>
@@ -474,15 +495,50 @@ export function RequirementForm({
                     <label className="block text-xs font-medium text-charcoal mb-1">
                       Unit
                     </label>
-                    <input
-                      type="text"
+                    <select
                       name={`lines[${idx}][unit_code]`}
                       value={line.unitCode}
                       onChange={(e) =>
                         updateLine(idx, "unitCode", e.target.value)
                       }
-                      placeholder="e.g. MT"
-                      className="w-full rounded-lg border border-border bg-white px-3 py-2 text-sm text-charcoal placeholder:text-muted focus:border-navy-900 focus:outline-none focus:ring-1 focus:ring-navy-900"
+                      className="w-full rounded-lg border border-border bg-white px-3 py-2 text-sm text-charcoal focus:border-navy-900 focus:outline-none focus:ring-1 focus:ring-navy-900"
+                    >
+                      <option value="">—</option>
+                      {(units.length > 0 ? units : [
+                        { code: "kg", name: "Kilogram" },
+                        { code: "t", name: "Metric tonne" },
+                      ]).map((unit) => (
+                        <option key={unit.code} value={unit.code}>
+                          {unit.code} — {unit.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                  <div>
+                    <label className="block text-xs font-medium text-charcoal mb-1">
+                      Delivery from
+                    </label>
+                    <input
+                      type="date"
+                      name={`lines[${idx}][delivery_from]`}
+                      value={line.deliveryFrom}
+                      onChange={(e) => updateLine(idx, "deliveryFrom", e.target.value)}
+                      className="w-full rounded-lg border border-border bg-white px-3 py-2 text-sm text-charcoal focus:border-navy-900 focus:outline-none focus:ring-1 focus:ring-navy-900"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-charcoal mb-1">
+                      Delivery until
+                    </label>
+                    <input
+                      type="date"
+                      name={`lines[${idx}][delivery_until]`}
+                      value={line.deliveryUntil}
+                      onChange={(e) => updateLine(idx, "deliveryUntil", e.target.value)}
+                      className="w-full rounded-lg border border-border bg-white px-3 py-2 text-sm text-charcoal focus:border-navy-900 focus:outline-none focus:ring-1 focus:ring-navy-900"
                     />
                   </div>
                 </div>
@@ -501,7 +557,8 @@ export function RequirementForm({
                   />
                 </div>
               </div>
-            ))}
+            );
+          })}
         </div>
       )}
 

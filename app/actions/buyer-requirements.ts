@@ -4,6 +4,14 @@ import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
 import { requireWorkspaceAccess } from "@/lib/auth/workspace-access";
+import {
+  normalizeRequirementLine,
+  parseRequirementLines,
+  planRequirementLineChanges,
+  requirementLineFormError,
+  validateRequirementLine,
+  type RequirementLineInput,
+} from "@/lib/requirement-lines";
 
 export interface BuyerRequirementActionResult {
   ok: boolean;
@@ -35,17 +43,6 @@ export const VALID_PRODUCT_FORMS = [
 ] as const;
 export type ProductForm = typeof VALID_PRODUCT_FORMS[number];
 
-interface RequirementLineInput {
-  commodityId: string;
-  productForm: string | null;
-  quantityMin: number | null;
-  quantityMax: number | null;
-  unitCode: string | null;
-  deliveryFrom: string | null;
-  deliveryUntil: string | null;
-  notes: string | null;
-}
-
 function canMutate(role: string): boolean {
   return role === "owner" || role === "admin" || role === "manager" || role === "contributor";
 }
@@ -54,36 +51,44 @@ function canDelete(role: string): boolean {
   return role === "owner" || role === "admin";
 }
 
-function parseLines(formData: FormData): RequirementLineInput[] {
-  const lines: RequirementLineInput[] = [];
-  let i = 0;
-  while (formData.get(`lines[${i}][commodity_id]`) !== null) {
-    const commodityId = (formData.get(`lines[${i}][commodity_id]`) as string).trim();
-    if (!commodityId) {
-      i++;
-      continue;
-    }
-    const productFormRaw = (formData.get(`lines[${i}][product_form]`) as string | null)?.trim();
-    const productForm = productFormRaw && VALID_PRODUCT_FORMS.includes(productFormRaw as ProductForm) ? productFormRaw : null;
-    const qMinStr = (formData.get(`lines[${i}][quantity_min]`) as string | null)?.trim();
-    const qMaxStr = (formData.get(`lines[${i}][quantity_max]`) as string | null)?.trim();
-    const unitCode = (formData.get(`lines[${i}][unit_code]`) as string | null)?.trim() || null;
-    const deliveryFrom = (formData.get(`lines[${i}][delivery_from]`) as string | null)?.trim() || null;
-    const deliveryUntil = (formData.get(`lines[${i}][delivery_until]`) as string | null)?.trim() || null;
-    const notes = (formData.get(`lines[${i}][notes]`) as string | null)?.trim() || null;
-    lines.push({
-      commodityId,
-      productForm,
-      quantityMin: qMinStr ? parseFloat(qMinStr) : null,
-      quantityMax: qMaxStr ? parseFloat(qMaxStr) : null,
-      unitCode,
-      deliveryFrom,
-      deliveryUntil,
-      notes,
-    });
-    i++;
+function optionalText(formData: FormData, key: string): string | null {
+  const value = (formData.get(key) as string | null)?.trim() ?? "";
+  return value || null;
+}
+
+function optionalIsoCode(value: string | null, length: number, label: string): string | null | { error: string } {
+  if (!value) return null;
+  const code = value.toUpperCase();
+  if (code.length !== length || !/^[A-Z]+$/.test(code)) {
+    return { error: `${label} must be a ${length}-letter ISO code.` };
   }
-  return lines;
+  return code;
+}
+
+function lineRow(workspaceId: string, requirementId: string, line: RequirementLineInput) {
+  return {
+    buyer_requirement_id: requirementId,
+    workspace_id: workspaceId,
+    commodity_id: line.commodityId,
+    product_form: line.productForm,
+    quantity_min: line.quantityMin,
+    quantity_max: line.quantityMax,
+    unit_code: line.unitCode,
+    delivery_from: line.deliveryFrom,
+    delivery_until: line.deliveryUntil,
+    notes: line.notes,
+  };
+}
+
+function prepareLines(formData: FormData): { lines: RequirementLineInput[] } | { error: string } {
+  const formError = requirementLineFormError(formData);
+  if (formError) return { error: formError };
+  const parsed = parseRequirementLines(formData).map(normalizeRequirementLine);
+  for (const line of parsed) {
+    const problem = validateRequirementLine(line);
+    if (problem) return { error: problem };
+  }
+  return { lines: parsed };
 }
 
 export async function createBuyerRequirementAction(
@@ -92,40 +97,42 @@ export async function createBuyerRequirementAction(
 ): Promise<BuyerRequirementActionResult> {
   const title = (formData.get("title") as string | null)?.trim() ?? "";
   const buyerOrgId = (formData.get("buyer_organization_id") as string | null)?.trim() ?? "";
+  const ownerUserId = optionalText(formData, "owner_user_id");
   const statusRaw = (formData.get("status") as string | null)?.trim() || "lead";
-  const targetDeliveryFrom = (formData.get("target_delivery_from") as string | null)?.trim() || null;
-  const targetDeliveryUntil = (formData.get("target_delivery_until") as string | null)?.trim() || null;
-  const deliveryCountryCode = (formData.get("delivery_country_code") as string | null)?.trim() || null;
-  const deliveryRegion = (formData.get("delivery_region") as string | null)?.trim() || null;
-  const deliveryLocation = (formData.get("delivery_location") as string | null)?.trim() || null;
-  const incoterm = (formData.get("incoterm") as string | null)?.trim() || null;
-  const currencyCode = (formData.get("currency_code") as string | null)?.trim() || null;
-  const notes = (formData.get("notes") as string | null)?.trim() || null;
+  const targetDeliveryFrom = optionalText(formData, "target_delivery_from");
+  const targetDeliveryUntil = optionalText(formData, "target_delivery_until");
+  const deliveryRegion = optionalText(formData, "delivery_region");
+  const deliveryLocation = optionalText(formData, "delivery_location");
+  const incoterm = optionalText(formData, "incoterm");
+  const notes = optionalText(formData, "notes");
+  const countryResult = optionalIsoCode(optionalText(formData, "delivery_country_code"), 2, "Destination country");
+  const currencyResult = optionalIsoCode(optionalText(formData, "currency_code"), 3, "Currency");
 
   if (!title) {
     return { ok: false, error: "Requirement title is required." };
+  }
+  if (!buyerOrgId) {
+    return { ok: false, error: "Select the buyer organisation." };
+  }
+  if (countryResult && typeof countryResult === "object") {
+    return { ok: false, error: countryResult.error };
+  }
+  if (currencyResult && typeof currencyResult === "object") {
+    return { ok: false, error: currencyResult.error };
+  }
+  if (targetDeliveryFrom && targetDeliveryUntil && targetDeliveryUntil < targetDeliveryFrom) {
+    return { ok: false, error: "Target delivery end date must be on or after the start date." };
   }
 
   const status = VALID_STATUSES.includes(statusRaw as BuyerRequirementStatus)
     ? (statusRaw as BuyerRequirementStatus)
     : "lead";
 
-  const newLines = parseLines(formData);
-  for (const line of newLines) {
-    const productForm = line.productForm ?? "";
-    if (!VALID_PRODUCT_FORMS.includes(productForm as ProductForm)) {
-      return { ok: false, error: `Invalid product form: ${productForm}.` };
-    }
-    if (line.quantityMin !== null && (isNaN(line.quantityMin) || line.quantityMin < 0)) {
-      return { ok: false, error: "Minimum quantity must be a non‑negative number." };
-    }
-    if (line.quantityMax !== null && (isNaN(line.quantityMax) || line.quantityMax < 0)) {
-      return { ok: false, error: "Maximum quantity must be a non‑negative number." };
-    }
-    if (line.quantityMin !== null && line.quantityMax !== null && line.quantityMin > line.quantityMax) {
-      return { ok: false, error: "Minimum quantity must not exceed maximum quantity." };
-    }
+  const prepared = prepareLines(formData);
+  if ("error" in prepared) {
+    return { ok: false, error: prepared.error };
   }
+  const newLines = prepared.lines;
 
   let supabase: Awaited<ReturnType<typeof createClient>>;
   let access;
@@ -148,38 +155,42 @@ export async function createBuyerRequirementAction(
     title,
     status,
     buyer_organization_id: buyerOrgId,
-    target_delivery_from: targetDeliveryFrom ?? "",
-    target_delivery_until: targetDeliveryUntil ?? "",
-    delivery_country_code: deliveryCountryCode ?? "",
-    delivery_region: deliveryRegion ?? "",
-    delivery_location: deliveryLocation ?? "",
-    incoterm: incoterm ?? "",
-    currency_code: currencyCode ?? "",
-    notes: notes ?? "",
-    created_at: new Date().toISOString(),
-    updated_at: new Date().toISOString(),
+    owner_user_id: ownerUserId,
+    target_delivery_from: targetDeliveryFrom,
+    target_delivery_until: targetDeliveryUntil,
+    delivery_country_code: countryResult,
+    delivery_region: deliveryRegion,
+    delivery_location: deliveryLocation,
+    incoterm,
+    currency_code: currencyResult,
+    notes,
   });
 
   if (insertError) {
     return { ok: false, error: `Failed to create buyer requirement: ${insertError.message}` };
   }
 
-  const linesToInsert = newLines.map((line) => ({
-    buyer_requirement_id: requirementId,
-    workspace_id: access.workspaceId,
-    commodity_id: line.commodityId,
-    product_form: line.productForm,
-    quantity_min: line.quantityMin,
-    quantity_max: line.quantityMax,
-    unit_code: line.unitCode,
-    delivery_from: line.deliveryFrom,
-    delivery_until: line.deliveryUntil,
-    notes: line.notes,
-  }));
-
-  const { error: linesError } = await supabase.from("requirement_lines").insert(linesToInsert);
-  if (linesError) {
-    return { ok: false, error: `Failed to save commodity lines: ${linesError.message}` };
+  if (newLines.length > 0) {
+    const { error: linesError } = await supabase
+      .from("requirement_lines")
+      .insert(newLines.map((line) => lineRow(access.workspaceId, requirementId, line)));
+    if (linesError) {
+      const { error: rollbackError } = await supabase
+        .from("buyer_requirements")
+        .delete()
+        .eq("id", requirementId)
+        .eq("workspace_id", access.workspaceId);
+      if (rollbackError) {
+        return {
+          ok: false,
+          error: `The requirement was saved, but its commodity lines were not. Open it and save the lines again. ${linesError.message}`,
+        };
+      }
+      return {
+        ok: false,
+        error: `Commodity lines were not saved, so the new requirement was removed. ${linesError.message}`,
+      };
+    }
   }
 
   revalidatePath("/buyer-requirements");
@@ -199,35 +210,46 @@ export async function updateBuyerRequirementAction(
 
   const title = (formData.get("title") as string | null)?.trim() ?? "";
   const buyerOrgId = (formData.get("buyer_organization_id") as string | null)?.trim() ?? "";
+  const ownerUserId = optionalText(formData, "owner_user_id");
   const statusRaw = (formData.get("status") as string | null)?.trim() || "lead";
-  const targetDeliveryFrom = (formData.get("target_delivery_from") as string | null)?.trim() || null;
-  const targetDeliveryUntil = (formData.get("target_delivery_until") as string | null)?.trim() || null;
-  const deliveryCountryCode = (formData.get("delivery_country_code") as string | null)?.trim() || null;
-  const deliveryRegion = (formData.get("delivery_region") as string | null)?.trim() || null;
-  const deliveryLocation = (formData.get("delivery_location") as string | null)?.trim() || null;
-  const incoterm = (formData.get("incoterm") as string | null)?.trim() || null;
-  const currencyCode = (formData.get("currency_code") as string | null)?.trim() || null;
-  const notes = (formData.get("notes") as string | null)?.trim() || null;
+  const targetDeliveryFrom = optionalText(formData, "target_delivery_from");
+  const targetDeliveryUntil = optionalText(formData, "target_delivery_until");
+  const deliveryRegion = optionalText(formData, "delivery_region");
+  const deliveryLocation = optionalText(formData, "delivery_location");
+  const incoterm = optionalText(formData, "incoterm");
+  const notes = optionalText(formData, "notes");
+  const countryResult = optionalIsoCode(optionalText(formData, "delivery_country_code"), 2, "Destination country");
+  const currencyResult = optionalIsoCode(optionalText(formData, "currency_code"), 3, "Currency");
+
+  if (!title) {
+    return { ok: false, error: "Requirement title is required." };
+  }
+  if (!buyerOrgId) {
+    return { ok: false, error: "Select the buyer organisation." };
+  }
+  if (countryResult && typeof countryResult === "object") {
+    return { ok: false, error: countryResult.error };
+  }
+  if (currencyResult && typeof currencyResult === "object") {
+    return { ok: false, error: currencyResult.error };
+  }
+  if (targetDeliveryFrom && targetDeliveryUntil && targetDeliveryUntil < targetDeliveryFrom) {
+    return { ok: false, error: "Target delivery end date must be on or after the start date." };
+  }
 
   const status = VALID_STATUSES.includes(statusRaw as BuyerRequirementStatus)
     ? (statusRaw as BuyerRequirementStatus)
     : "lead";
 
-  const newLines = parseLines(formData);
-  for (const line of newLines) {
-    const productForm = line.productForm ?? "";
-    if (!VALID_PRODUCT_FORMS.includes(productForm as ProductForm)) {
-      return { ok: false, error: `Invalid product form: ${productForm}.` };
-    }
-    if (line.quantityMin !== null && (isNaN(line.quantityMin) || line.quantityMin < 0)) {
-      return { ok: false, error: "Minimum quantity must be a non‑negative number." };
-    }
-    if (line.quantityMax !== null && (isNaN(line.quantityMax) || line.quantityMax < 0)) {
-      return { ok: false, error: "Maximum quantity must be a non‑negative number." };
-    }
-    if (line.quantityMin !== null && line.quantityMax !== null && line.quantityMin > line.quantityMax) {
-      return { ok: false, error: "Minimum quantity must not exceed maximum quantity." };
-    }
+  const prepared = prepareLines(formData);
+  if ("error" in prepared) {
+    return { ok: false, error: prepared.error };
+  }
+  if (formData.get("lines_submitted") !== "1") {
+    return {
+      ok: false,
+      error: "Commodity lines were not included in this save, so existing lines were left unchanged.",
+    };
   }
 
   let supabase: Awaited<ReturnType<typeof createClient>>;
@@ -243,49 +265,100 @@ export async function updateBuyerRequirementAction(
     return { ok: false, error: "You do not have permission to edit buyer requirements." };
   }
 
-  const { error: updateError } = await supabase.from("buyer_requirements").update({
+  const { data: updatedRows, error: updateError } = await supabase.from("buyer_requirements").update({
     title,
     status,
     buyer_organization_id: buyerOrgId,
+    owner_user_id: ownerUserId,
     target_delivery_from: targetDeliveryFrom,
     target_delivery_until: targetDeliveryUntil,
-    delivery_country_code: deliveryCountryCode,
+    delivery_country_code: countryResult,
     delivery_region: deliveryRegion,
     delivery_location: deliveryLocation,
     incoterm,
-    currency_code: currencyCode,
+    currency_code: currencyResult,
     notes,
     updated_at: new Date().toISOString(),
-  }).eq("id", requirementId).eq("workspace_id", access.workspaceId);
+  }).eq("id", requirementId).eq("workspace_id", access.workspaceId).select("id");
 
   if (updateError) {
     return { ok: false, error: `Failed to update requirement: ${updateError.message}` };
   }
-
-  // delete existing lines
-  const { error: deleteError } = await supabase.from("requirement_lines").delete()
-    .eq("buyer_requirement_id", requirementId)
-    .eq("workspace_id", access.workspaceId);
-  if (deleteError) {
-    return { ok: false, error: `Failed to delete old lines: ${deleteError.message}` };
+  if (!updatedRows || updatedRows.length === 0) {
+    return {
+      ok: false,
+      error: "That requirement is not in this workspace, so its commodity lines were not changed.",
+    };
   }
 
-  const linesToInsert = newLines.map((line) => ({
-    buyer_requirement_id: requirementId,
-    workspace_id: access.workspaceId,
-    commodity_id: line.commodityId,
-    product_form: line.productForm,
-    quantity_min: line.quantityMin,
-    quantity_max: line.quantityMax,
-    unit_code: line.unitCode,
-    delivery_from: line.deliveryFrom,
-    delivery_until: line.deliveryUntil,
-    notes: line.notes,
-  }));
+  const { data: existingLines, error: existingError } = await supabase
+    .from("requirement_lines")
+    .select("id")
+    .eq("buyer_requirement_id", requirementId)
+    .eq("workspace_id", access.workspaceId);
 
-  const { error: insertError } = await supabase.from("requirement_lines").insert(linesToInsert);
-  if (insertError) {
-    return { ok: false, error: `Failed to save commodity lines: ${insertError.message}` };
+  if (existingError) {
+    return { ok: false, error: `Requirement details were saved, but existing commodity lines could not be read: ${existingError.message}` };
+  }
+
+  const planned = planRequirementLineChanges(
+    (existingLines ?? []).map((line) => line.id as string),
+    prepared.lines,
+  );
+  if (!planned.ok) {
+    return { ok: false, error: planned.error };
+  }
+
+  if (planned.plan.insert.length > 0) {
+    const { error: insertError } = await supabase
+      .from("requirement_lines")
+      .insert(planned.plan.insert.map((line) => lineRow(access.workspaceId, requirementId, line)));
+    if (insertError) {
+      return {
+        ok: false,
+        error: `New commodity lines could not be saved. Existing lines were kept. ${insertError.message}`,
+      };
+    }
+  }
+
+  for (const line of planned.plan.update) {
+    const { error: lineUpdateError } = await supabase
+      .from("requirement_lines")
+      .update({
+        commodity_id: line.commodityId,
+        product_form: line.productForm,
+        quantity_min: line.quantityMin,
+        quantity_max: line.quantityMax,
+        unit_code: line.unitCode,
+        delivery_from: line.deliveryFrom,
+        delivery_until: line.deliveryUntil,
+        notes: line.notes,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", line.id)
+      .eq("buyer_requirement_id", requirementId)
+      .eq("workspace_id", access.workspaceId);
+    if (lineUpdateError) {
+      return {
+        ok: false,
+        error: `A commodity line could not be updated. Lines already stored were not deleted. ${lineUpdateError.message}`,
+      };
+    }
+  }
+
+  if (planned.plan.deleteIds.length > 0) {
+    const { error: deleteError } = await supabase
+      .from("requirement_lines")
+      .delete()
+      .in("id", planned.plan.deleteIds)
+      .eq("buyer_requirement_id", requirementId)
+      .eq("workspace_id", access.workspaceId);
+    if (deleteError) {
+      return {
+        ok: false,
+        error: `Updated lines were saved, but a removed line could not be deleted. It may still have specification records. ${deleteError.message}`,
+      };
+    }
   }
 
   revalidatePath(`/buyer-requirements/${requirementId}`);
