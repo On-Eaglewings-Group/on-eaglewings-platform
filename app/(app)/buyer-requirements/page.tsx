@@ -151,6 +151,14 @@ export default async function BuyerRequirementsPage({
           <div>
             <h1 className="text-2xl font-bold tracking-tight text-charcoal">Buyer Requirements</h1>
             <p className="text-sm text-muted">Manage buyer requirements and commercial needs.</p>
+<div className="mt-3">
+  <Link
+    href="/buyer-requirements/new"
+    className="inline-flex items-center gap-2 rounded-lg bg-navy-900 px-4 py-2.5 text-sm font-medium text-white hover:bg-navy-800">
+    <PlusIcon className="h-4 w-4" />
+    Add a Buyer Requirement
+  </Link>
+</div>
           </div>
         </div>
 
