@@ -71,6 +71,7 @@ select lives_ok($$select public.create_user_profile_if_missing('Changed name')$$
 select is((select display_name from public.user_profiles where user_id='a1000000-0000-4000-8000-000000000006'),'New invitee','existing profile bootstrap does not overwrite stored profile data');
 select is(public.accept_pending_invitation('phase2a-new@example.invalid'),'b1000000-0000-4000-8000-000000000001'::uuid,'valid pending invitation is accepted through the public RPC');
 select is((select role from public.workspace_memberships where workspace_id='b1000000-0000-4000-8000-000000000001' and user_id='a1000000-0000-4000-8000-000000000006'),'contributor','valid invitation creates the invited membership role');
+select set_config('request.jwt.claim.sub','a1000000-0000-4000-8000-000000000001',true);
 select is((select count(*)::int from public.pending_invitations where invited_email='phase2a-new@example.invalid' and accepted_at is not null),1,'valid invitation is stamped accepted');
 
 select set_config('request.jwt.claim.sub','a1000000-0000-4000-8000-000000000007',true);
@@ -211,12 +212,65 @@ select throws_ok(
 );
 select set_config('request.jwt.claim.sub','a1000000-0000-4000-8000-000000000003',true);
 select lives_ok(
-  $$select public.delete_requirement_line_with_specifications(
-    'b1000000-0000-4000-8000-000000000001',
-    'e1000000-0000-4000-8000-000000000002',
-    (select id from public.requirement_lines where buyer_requirement_id='e1000000-0000-4000-8000-000000000002')
-  )$$,
-  'contributor can atomically delete a line and its specifications'
+  $$do $regression$
+  declare
+    affected_rows integer;
+    line_id uuid := (
+      select rl.id
+      from public.requirement_lines as rl
+      where rl.buyer_requirement_id='e1000000-0000-4000-8000-000000000002'
+    );
+  begin
+    delete from public.requirement_specifications as rs
+    where rs.requirement_line_id=line_id;
+    get diagnostics affected_rows = row_count;
+    if affected_rows <> 0 then
+      raise exception 'Contributor directly deleted requirement specifications.';
+    end if;
+
+    delete from public.requirement_lines as rl
+    where rl.id=line_id;
+    get diagnostics affected_rows = row_count;
+    if affected_rows <> 0 then
+      raise exception 'Contributor directly deleted a requirement line.';
+    end if;
+
+    perform pg_catalog.set_config('request.jwt.claim.sub','',true);
+    begin
+      perform public.delete_requirement_line_with_specifications(
+        'b1000000-0000-4000-8000-000000000001',
+        'e1000000-0000-4000-8000-000000000002',
+        line_id
+      );
+      raise exception 'Unauthenticated requirement-line deletion unexpectedly succeeded.';
+    exception
+      when insufficient_privilege then
+        null;
+    end;
+
+    perform pg_catalog.set_config('request.jwt.claim.sub','a1000000-0000-4000-8000-000000000008',true);
+    begin
+      perform public.delete_requirement_line_with_specifications(
+        'b1000000-0000-4000-8000-000000000002',
+        'e1000000-0000-4000-8000-000000000002',
+        line_id
+      );
+      raise exception 'Cross-workspace requirement-line deletion unexpectedly succeeded.';
+    exception
+      when insufficient_privilege or no_data_found then
+        null;
+    end;
+
+    perform pg_catalog.set_config('request.jwt.claim.sub','a1000000-0000-4000-8000-000000000003',true);
+    perform public.delete_requirement_line_with_specifications(
+      'b1000000-0000-4000-8000-000000000001',
+      'e1000000-0000-4000-8000-000000000002',
+      line_id
+    );
+  end;
+  $regression$
+  $$,
+  'contributor RPC deletion works while direct and cross-workspace deletes are blocked'
 );
 select is(
   (select (select count(*) from public.requirement_lines where buyer_requirement_id='e1000000-0000-4000-8000-000000000002')
@@ -243,6 +297,21 @@ select lives_ok(
 );
 select set_config('request.jwt.claim.sub','a1000000-0000-4000-8000-000000000001',true);
 select is(public.delete_buyer_requirement_record('b1000000-0000-4000-8000-000000000001','e1000000-0000-4000-8000-000000000002'),'archived'::text,'linked requirement is archived without breaking matching history');
+do $archive_metadata$
+begin
+  if not exists (
+    select 1
+    from public.buyer_requirements as br
+    where br.workspace_id='b1000000-0000-4000-8000-000000000001'
+      and br.id='e1000000-0000-4000-8000-000000000002'
+      and br.archived_at is not null
+      and br.updated_at is not null
+      and br.updated_by='a1000000-0000-4000-8000-000000000001'
+  ) then
+    raise exception 'Buyer requirement archive metadata does not identify the authenticated owner.';
+  end if;
+end;
+$archive_metadata$;
 select is((select count(*)::int from public.requirement_lines where buyer_requirement_id='e1000000-0000-4000-8000-000000000002'),1,'archiving preserves the buyer commodity line');
 select is((select count(*)::int from public.requirement_specifications rs join public.requirement_lines rl on rl.id=rs.requirement_line_id where rl.buyer_requirement_id='e1000000-0000-4000-8000-000000000002'),1,'archiving preserves the structured specification');
 select set_config('request.jwt.claim.sub','a1000000-0000-4000-8000-000000000003',true);
