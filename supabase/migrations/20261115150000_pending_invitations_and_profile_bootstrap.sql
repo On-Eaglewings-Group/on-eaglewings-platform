@@ -1,7 +1,6 @@
--- Phase 1 — Invitation system and user profile bootstrap.
--- Adds: pending_invitations table, private.create_user_profile_if_missing() function,
---        private.accept_pending_invitation() function.
--- Target Supabase Project: gcslfldcqiqdatdswfck
+-- Invitation system and user profile bootstrap.
+-- Adds pending_invitations plus private implementation functions and public,
+-- authenticated-only RPC entrypoints used by the application callback.
 -- Does NOT alter any existing table, column, RLS policy, or trigger.
 
 begin;
@@ -211,5 +210,35 @@ $function$;
 
 revoke all on function private.accept_pending_invitation(uuid, text) from public, anon;
 grant execute on function private.accept_pending_invitation(uuid, text) to authenticated;
+
+-- The Data API exposes public, not private. These invoker wrappers expose only
+-- the callback operations and derive the user ID from the authenticated JWT.
+-- The private SECURITY DEFINER functions retain their identity and invitation
+-- checks. No role or workspace ID is accepted from the caller.
+create or replace function public.create_user_profile_if_missing(
+  p_display_name text default ''
+)
+returns void
+language sql
+security invoker
+set search_path = ''
+as $function$
+  select private.create_user_profile_if_missing((select auth.uid()), p_display_name);
+$function$;
+
+revoke all on function public.create_user_profile_if_missing(text) from public, anon;
+grant execute on function public.create_user_profile_if_missing(text) to authenticated;
+
+create or replace function public.accept_pending_invitation(p_email text)
+returns uuid
+language sql
+security invoker
+set search_path = ''
+as $function$
+  select private.accept_pending_invitation((select auth.uid()), p_email);
+$function$;
+
+revoke all on function public.accept_pending_invitation(text) from public, anon;
+grant execute on function public.accept_pending_invitation(text) to authenticated;
 
 commit;

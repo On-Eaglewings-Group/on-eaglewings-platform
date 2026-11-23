@@ -1,8 +1,7 @@
 -- On-Eaglewings: document storage path and document deletion policy.
 --
--- Additive change: no existing table, column, data or policy is altered or
--- removed. Safe to run against production; reversible by dropping the column
--- and the policy.
+-- Additive schema change; it does not alter existing business rows. Reversible
+-- by dropping the column and policy.
 --
 -- 1. storage_path records the Supabase Storage object path for each document
 --    so uploads can be downloaded and deleted through the application.
@@ -15,24 +14,20 @@ begin;
 alter table public.documents
   add column if not exists storage_path text;
 
--- 2. Create the delete policy idempotently via pg_policies check
-do $$
-begin
-  if not exists (
-    select 1
-    from pg_policies
-    where schemaname = 'public'
-      and tablename = 'documents'
-      and policyname = 'documents_delete_manager'
-  ) then
-    create policy documents_delete_manager
-    on public.documents
-    for delete to authenticated
-    using (
-      private.has_workspace_role(workspace_id, array['owner','admin','manager'])
-    );
-  end if;
-end $$;
+-- 2. Owners/admins may delete every classification. Managers may delete only
+--    non-restricted documents. Replace a same-named policy so an older broad
+--    expression cannot remain active.
+drop policy if exists documents_delete_manager on public.documents;
+create policy documents_delete_manager
+on public.documents
+for delete to authenticated
+using (
+  private.has_workspace_role(workspace_id, array['owner','admin'])
+  or (
+    classification <> 'restricted'
+    and private.has_workspace_role(workspace_id, array['manager'])
+  )
+);
 
 -- 3. Document the column
 comment on column public.documents.storage_path is
