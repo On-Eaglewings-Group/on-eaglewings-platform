@@ -1,0 +1,419 @@
+name: Database security tests
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  local-database-security:
+    name: Local Supabase migrations and pgTAP
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      SUPABASE_TELEMETRY_DISABLED: "1"
+      SUPABASE_DB_SEED_ENABLED: "false"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          package-manager-cache: false
+
+      - name: Install Supabase CLI
+        uses: supabase/setup-cli@v3
+        with:
+          version: 3.1.0
+
+      - name: Start disposable local Supabase
+        id: start
+        shell: bash
+        run: |
+          set -euo pipefail
+          log="$RUNNER_TEMP/on-eaglewings-supabase-start.log"
+
+          if supabase start >"$log" 2>&1; then
+            echo "Disposable local Supabase stack started."
+          else
+            status=$?
+            echo "::error::supabase start failed with exit code ${status}. Sanitized diagnostic lines follow."
+            python3 - "$log" <<'PY'
+          import re
+          import sys
+          from pathlib import Path
+
+          sensitive = re.compile(
+              r"password|secret|token|credential|service[_ -]?role|anon(?: key)?|"
+              r"publishable(?: key)?|api key|connection string|db url|database url|"
+              r"sb_(?:secret|publishable)_[A-Za-z0-9_-]+|postgres(?:ql)?://",
+              re.IGNORECASE,
+          )
+          interesting = re.compile(r"Applying migration|error|failed|fatal|panic|docker|health", re.IGNORECASE)
+          for line in Path(sys.argv[1]).read_text(errors="replace").splitlines():
+              if interesting.search(line) and not sensitive.search(line):
+                  print(line[:500])
+          PY
+            exit "$status"
+          fi
+
+      - name: Reset local database and apply migrations
+        id: migrate
+        shell: bash
+        run: |
+          set -euo pipefail
+          log="$RUNNER_TEMP/on-eaglewings-db-reset.log"
+
+          if supabase db reset --no-seed >"$log" 2>&1; then
+            python3 - "$log" <<'PY'
+          import re
+          import sys
+          from pathlib import Path
+
+          expected = [
+              "20261113165002_phase_2a_database_foundation.sql",
+              "20261114075715_restricted_documents_owner_admin_only.sql",
+              "20261115150000_pending_invitations_and_profile_bootstrap.sql",
+              "20261117000000_documents_storage_and_delete.sql",
+              "20261119160000_workspace_documents_storage_policies.sql",
+              "20261121120000_create_workspace_documents_bucket.sql",
+              "20261122120000_opportunity_pipeline.sql",
+              "20261122121000_ai_request_limits.sql",
+              "20261122122000_opportunity_supply_products.sql",
+              "20261122123000_requirement_specification_workflow.sql",
+          ]
+          lines = Path(sys.argv[1]).read_text(errors="replace").splitlines()
+          applying = [line for line in lines if re.search(r"Applying migration", line, re.IGNORECASE)]
+          observed = []
+          for line in applying:
+              match = next((name for name in expected if name in line), None)
+              if match:
+                  observed.append(match)
+
+          if observed != expected:
+              print("::error::Migration reset did not report all ten expected migrations in chronological order.")
+              print(f"Expected migrations: {len(expected)}; observed migration entries: {len(observed)}.")
+              if observed:
+                  print("Observed: " + ", ".join(observed))
+              sys.exit(1)
+
+          print(f"Local migration reset succeeded: {len(observed)}/10 migrations applied in chronological order.")
+          PY
+          else
+            status=$?
+            echo "::error::supabase db reset --no-seed failed with exit code ${status}. Sanitized migration diagnostics follow."
+            python3 - "$log" <<'PY'
+          import re
+          import sys
+          from pathlib import Path
+
+          sensitive = re.compile(
+              r"password|secret|token|credential|service[_ -]?role|anon(?: key)?|"
+              r"publishable(?: key)?|api key|connection string|db url|database url|"
+              r"sb_(?:secret|publishable)_[A-Za-z0-9_-]+|postgres(?:ql)?://",
+              re.IGNORECASE,
+          )
+          interesting = re.compile(r"Applying migration|error|failed|fatal|panic", re.IGNORECASE)
+          for line in Path(sys.argv[1]).read_text(errors="replace").splitlines():
+              if interesting.search(line) and not sensitive.search(line):
+                  print(line[:500])
+          PY
+            exit "$status"
+          fi
+
+      - name: Run the complete local pgTAP suite
+        id: pgtap
+        shell: bash
+        run: |
+          set -euo pipefail
+          log="$RUNNER_TEMP/on-eaglewings-pgtap.log"
+          status=0
+          supabase test db >"$log" 2>&1 || status=$?
+
+          python3 - "$log" "$status" <<'PY'
+          import re
+          import sys
+          from pathlib import Path
+
+          expected = 118
+          test_root = Path("supabase/tests")
+          test_files = sorted(
+              path for path in test_root.rglob("*")
+              if path.is_file() and path.suffix.lower() in {".sql", ".pg"}
+          )
+          plan_pattern = re.compile(r"(?im)^\s*select\s+plan\s*\(\s*(\d+)\s*\)")
+          assertion_pattern = re.compile(
+              r"(?im)^\s*select\s+(?:extensions\.)?(is|ok|throws_ok|lives_ok)\s*\("
+          )
+          plans = []
+          source_assertions = 0
+          for path in test_files:
+              source = path.read_text(encoding="utf-8")
+              plans.extend(int(value) for value in plan_pattern.findall(source))
+              source_assertions += len(assertion_pattern.findall(source))
+          planned = sum(plans) if plans else None
+
+          log_path = Path(sys.argv[1])
+          output = log_path.read_text(errors="replace")
+          cli_status = int(sys.argv[2])
+          result_matches = re.findall(r"(?im)^\s*Result:\s*(PASS|FAIL|NOTESTS)\s*$", output)
+          result = result_matches[-1].upper() if result_matches else "NOT REPORTED"
+          executed_matches = re.findall(r"\bTests\s*=\s*(\d+)\b", output)
+          executed = int(executed_matches[-1]) if executed_matches else None
+
+          failure_matches = re.findall(
+              r"(?im)(\d+)\s*/\s*\d+\s+subtests?\s+failed\b", output
+          )
+          failure_matches.extend(re.findall(r"(?im)\bFailed:\s*(\d+)\b", output))
+          not_ok_count = len(re.findall(r"(?im)^\s*not\s+ok\b", output))
+          if failure_matches:
+              failed = int(failure_matches[-1])
+          elif not_ok_count:
+              failed = not_ok_count
+          elif result == "PASS" and cli_status == 0:
+              failed = 0
+          else:
+              failed = None
+          passed = executed - failed if executed is not None and failed is not None else None
+
+          sql_error_lines = [
+              line for line in output.splitlines()
+              if re.search(r"\b(?:ERROR|FATAL|PANIC):", line, re.IGNORECASE)
+          ]
+          sql_errors = len(sql_error_lines)
+
+          def show(value):
+              return "not reported" if value is None else str(value)
+
+          print(
+              "pgTAP summary: "
+              f"planned={show(planned)}, executed={show(executed)}, "
+              f"passed={show(passed)}, failed={show(failed)}, SQL errors={sql_errors}, "
+              f"pg_prove result={result}, CLI exit={cli_status}."
+          )
+
+          valid = (
+              cli_status == 0
+              and result == "PASS"
+              and len(test_files) > 0
+              and len(plans) == len(test_files)
+              and planned == expected
+              and source_assertions == expected
+              and executed == expected
+              and passed == expected
+              and failed == 0
+              and sql_errors == 0
+          )
+
+          if not valid:
+              print(
+                  "::error::pgTAP verification failed: expected one plan per SQL/pg test file, "
+                  "118 source assertions, 118 executed and passed tests, zero failures, "
+                  "zero SQL errors, and pg_prove Result: PASS."
+              )
+              sensitive = re.compile(
+                  r"password|secret|token|credential|service[_ -]?role|anon(?: key)?|"
+                  r"publishable(?: key)?|api key|connection string|db url|database url|"
+                  r"sb_(?:secret|publishable)_[A-Za-z0-9_-]+|postgres(?:ql)?://",
+                  re.IGNORECASE,
+              )
+              interesting = re.compile(r"not ok|error|failed|result:|tests=|all tests", re.IGNORECASE)
+              for line in output.splitlines():
+                  if interesting.search(line) and not sensitive.search(line):
+                      print(line[:500])
+              sys.exit(1)
+          PY
+
+      - name: Stop disposable local Supabase
+        id: cleanup
+        if: ${{ always() && steps.start.outcome != 'skipped' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          log="$RUNNER_TEMP/on-eaglewings-supabase-stop.log"
+
+          if supabase stop --no-backup --project-id on-eaglewings-platform >"$log" 2>&1; then
+            echo "Disposable local Supabase stack stopped and its runner-local data volume removed."
+          else
+            status=$?
+            echo "::error::Local Supabase cleanup failed with exit code ${status}."
+            python3 - "$log" <<'PY'
+          import re
+          import sys
+          from pathlib import Path
+
+          sensitive = re.compile(
+              r"password|secret|token|credential|service[_ -]?role|anon(?: key)?|"
+              r"publishable(?: key)?|api key|connection string|db url|database url|"
+              r"sb_(?:secret|publishable)_[A-Za-z0-9_-]+|postgres(?:ql)?://",
+              re.IGNORECASE,
+          )
+          for line in Path(sys.argv[1]).read_text(errors="replace").splitlines():
+              if re.search(r"error|failed|fatal|panic", line, re.IGNORECASE) and not sensitive.search(line):
+                  print(line[:500])
+          PY
+            exit "$status"
+          fi
+
+      - name: Publish verification summary
+        if: ${{ always() }}
+        shell: bash
+        env:
+          START_RESULT: ${{ steps.start.outcome }}
+          MIGRATION_RESULT: ${{ steps.migrate.outcome }}
+          PGTAP_STEP_RESULT: ${{ steps.pgtap.outcome }}
+          CLEANUP_RESULT: ${{ steps.cleanup.outcome }}
+        run: |
+          python3 - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          temp = Path(os.environ["RUNNER_TEMP"])
+          start_log = temp / "on-eaglewings-supabase-start.log"
+          reset_log = temp / "on-eaglewings-db-reset.log"
+          test_log = temp / "on-eaglewings-pgtap.log"
+          expected = [
+              "20261113165002_phase_2a_database_foundation.sql",
+              "20261114075715_restricted_documents_owner_admin_only.sql",
+              "20261115150000_pending_invitations_and_profile_bootstrap.sql",
+              "20261117000000_documents_storage_and_delete.sql",
+              "20261119160000_workspace_documents_storage_policies.sql",
+              "20261121120000_create_workspace_documents_bucket.sql",
+              "20261122120000_opportunity_pipeline.sql",
+              "20261122121000_ai_request_limits.sql",
+              "20261122122000_opportunity_supply_products.sql",
+              "20261122123000_requirement_specification_workflow.sql",
+          ]
+
+          def read(path):
+              return path.read_text(errors="replace") if path.exists() else ""
+
+          start_output = read(start_log)
+          reset_output = read(reset_log)
+          test_output = read(test_log)
+          applied_lines = [
+              line for line in reset_output.splitlines()
+              if re.search(r"Applying migration", line, re.IGNORECASE)
+          ]
+          applied = [name for line in applied_lines for name in expected if name in line]
+          planned_matches = re.findall(
+              r"(?im)^\s*select\s+plan\s*\(\s*(\d+)\s*\)",
+              "\n".join(
+                  path.read_text(encoding="utf-8")
+                  for path in Path("supabase/tests").rglob("*")
+                  if path.is_file() and path.suffix.lower() in {".sql", ".pg"}
+              ),
+          )
+          planned = sum(int(value) for value in planned_matches) if planned_matches else None
+          executed_matches = re.findall(r"\bTests\s*=\s*(\d+)\b", test_output)
+          executed = int(executed_matches[-1]) if executed_matches else None
+          result_matches = re.findall(r"(?im)^\s*Result:\s*(PASS|FAIL|NOTESTS)\s*$", test_output)
+          pg_prove_result = result_matches[-1].upper() if result_matches else "NOT REPORTED"
+          fail_matches = re.findall(
+              r"(?im)(\d+)\s*/\s*\d+\s+subtests?\s+failed\b", test_output
+          )
+          fail_matches.extend(re.findall(r"(?im)\bFailed:\s*(\d+)\b", test_output))
+          not_ok_count = len(re.findall(r"(?im)^\s*not\s+ok\b", test_output))
+          if fail_matches:
+              failed = int(fail_matches[-1])
+          elif not_ok_count:
+              failed = not_ok_count
+          elif pg_prove_result == "PASS":
+              failed = 0
+          else:
+              failed = None
+          passed = executed - failed if executed is not None and failed is not None else None
+          sql_error_lines = [
+              line for line in (start_output + "\n" + reset_output + "\n" + test_output).splitlines()
+              if re.search(r"\b(?:ERROR|FATAL|PANIC):", line, re.IGNORECASE)
+          ]
+          sql_errors = len(sql_error_lines)
+
+          def value(item):
+              return "not reported" if item is None else str(item)
+
+          start_result = os.environ.get("START_RESULT", "skipped")
+          migration_result = os.environ.get("MIGRATION_RESULT", "skipped")
+          test_step_result = os.environ.get("PGTAP_STEP_RESULT", "skipped")
+          cleanup_result = os.environ.get("CLEANUP_RESULT", "skipped")
+          migration_ok = migration_result == "success" and applied == expected
+          migration_label = (
+              f"PASS — {len(applied)}/10 applied in chronological order"
+              if migration_ok
+              else f"FAIL — {len(applied)}/10 application entries recorded"
+          )
+          if migration_result != "success" and applied_lines:
+              last_line = applied_lines[-1]
+              attempted = next((name for name in expected if name in last_line), None)
+              if attempted:
+                  migration_label += f"; last migration attempted: `{attempted}`"
+          elif os.environ.get("START_RESULT") != "success":
+              start_applying = [
+                  line for line in start_output.splitlines()
+                  if re.search(r"Applying migration", line, re.IGNORECASE)
+              ]
+              attempted = (
+                  next((name for name in expected if name in start_applying[-1]), None)
+                  if start_applying
+                  else None
+              )
+              if attempted:
+                  migration_label += f"; startup last attempted: `{attempted}`"
+              else:
+                  migration_label += "; local stack startup failed before reset"
+
+          summary = [
+              "# On-Eaglewings local database security verification",
+              "",
+              "| Check | Result |",
+              "| --- | --- |",
+              f"| Local Supabase startup | {start_result} |",
+              f"| Migration application | {migration_label} |",
+              f"| pgTAP command step | {test_step_result} |",
+              f"| pgTAP result | {pg_prove_result} |",
+              f"| Assertions planned | {value(planned)} |",
+              f"| Assertions executed | {value(executed)} |",
+              f"| Assertions passed | {value(passed)} |",
+              f"| Assertions failed | {value(failed)} |",
+              f"| SQL errors in migration/test output | {sql_errors} |",
+              f"| Local stack cleanup | {cleanup_result} |",
+              "",
+              "The commands use the disposable local Supabase stack; no remote project credentials or URLs are configured in this workflow.",
+          ]
+          summary_path = Path(os.environ["GITHUB_STEP_SUMMARY"])
+          with summary_path.open("a", encoding="utf-8") as stream:
+              stream.write("\n".join(summary) + "\n")
+
+          if start_result != "success":
+              print("Local Supabase did not start successfully.")
+          if migration_result != "success" or not migration_ok:
+              print("Migration application or migration-order verification did not succeed.")
+          if test_step_result != "success":
+              print("The pgTAP command or its 118-assertion verification did not succeed.")
+          if cleanup_result != "success":
+              print("The local stack cleanup did not succeed.")
+          if sql_errors:
+              print(f"Detected {sql_errors} SQL error line(s) in reset/test output.")
+
+          success = (
+              start_result == "success"
+              and migration_ok
+              and test_step_result == "success"
+              and pg_prove_result == "PASS"
+              and planned == 118
+              and executed == 118
+              and passed == 118
+              and failed == 0
+              and sql_errors == 0
+              and cleanup_result == "success"
+          )
+          if not success:
+              raise SystemExit(1)
+          PY
